@@ -7,34 +7,19 @@ import (
 	"github.com/docker/cli/cli/command"
 
 	"github.com/docker/mcp-gateway/cmd/docker-mcp/hints"
+	"github.com/docker/mcp-gateway/pkg/client"
+	"github.com/docker/mcp-gateway/pkg/db"
 )
 
-func Connect(ctx context.Context, dockerCli command.Cli, cwd string, config Config, vendor string, global, quiet bool, workingSet string) error {
-	if vendor == vendorCodex {
-		if !global {
-			return fmt.Errorf("codex only supports global configuration. Re-run with --global or -g")
-		}
-		if err := connectCodex(ctx); err != nil {
-			return err
-		}
-	} else if vendor == vendorGordon && global {
-		if err := connectGordon(ctx); err != nil {
-			return err
-		}
-	} else {
-		updater, err := GetUpdater(vendor, global, cwd, config)
-		if err != nil {
-			return err
-		}
-		if workingSet != "" {
-			if err := updater(DockerMCPCatalog, newMcpGatewayServerWithWorkingSet(workingSet)); err != nil {
-				return err
-			}
-		} else {
-			if err := updater(DockerMCPCatalog, newMCPGatewayServer()); err != nil {
-				return err
-			}
-		}
+func Connect(ctx context.Context, dockerCli command.Cli, cwd string, config client.Config, vendor string, global, quiet bool, workingSet string) error {
+	dao, err := db.New()
+	if err != nil {
+		return err
+	}
+	defer dao.Close()
+
+	if err := client.Connect(ctx, dao, cwd, config, vendor, global, workingSet); err != nil {
+		return err
 	}
 	if quiet {
 		return nil

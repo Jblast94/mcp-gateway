@@ -39,12 +39,12 @@ func UpdateConfig(ctx context.Context, dao db.DAO, ociService oci.Service, id st
 		return fmt.Errorf("failed to resolve snapshots: %w", err)
 	}
 
-	outputMap := make(map[string]string)
+	outputMap := make(map[string]any)
 
 	if getAll {
 		for _, server := range workingSet.Servers {
-			for configName, value := range server.Config {
-				outputMap[fmt.Sprintf("%s.%s", server.Snapshot.Server.Name, configName)] = fmt.Sprintf("%v", value)
+			for configName, value := range flattenConfig(server.Config) {
+				outputMap[fmt.Sprintf("%s.%s", server.Snapshot.Server.Name, configName)] = value
 			}
 		}
 	} else {
@@ -59,8 +59,9 @@ func UpdateConfig(ctx context.Context, dao db.DAO, ociService oci.Service, id st
 				return fmt.Errorf("server %s not found in profile for argument %s", serverName, configArg)
 			}
 
-			if server.Config != nil && server.Config[configName] != nil {
-				outputMap[configArg] = fmt.Sprintf("%v", server.Config[configName])
+			value := getConfigValue(configName, server.Config)
+			if value != nil {
+				outputMap[configArg] = value
 			}
 		}
 	}
@@ -84,9 +85,14 @@ func UpdateConfig(ctx context.Context, dao db.DAO, ociService oci.Service, id st
 		if server.Config == nil {
 			server.Config = make(map[string]any)
 		}
-		// TODO(cody): validate that schema supports the config we're adding and map it to the right type (right now we're forcing a string)
-		server.Config[configName] = value
-		outputMap[key] = value
+		// TODO(cody): validate that schema supports the config we're adding
+		finalValue := any(value)
+		var decoded any
+		if err := json.Unmarshal([]byte(value), &decoded); err == nil {
+			finalValue = decoded
+		}
+		mergeValueIntoMap(server.Config, configName, finalValue)
+		outputMap[key] = finalValue
 	}
 
 	for _, delConfigArg := range delConfigArgs {
@@ -100,8 +106,7 @@ func UpdateConfig(ctx context.Context, dao db.DAO, ociService oci.Service, id st
 			return fmt.Errorf("server %s not found in profile for argument %s", serverName, delConfigArg)
 		}
 
-		if server.Config != nil && server.Config[configName] != nil {
-			delete(server.Config, configName)
+		if server.Config != nil && deleteValueFromMap(server.Config, configName) {
 			delete(outputMap, delConfigArg)
 		}
 	}
@@ -116,7 +121,7 @@ func UpdateConfig(ctx context.Context, dao db.DAO, ociService oci.Service, id st
 	switch outputFormat {
 	case OutputFormatHumanReadable:
 		for configName, value := range outputMap {
-			fmt.Printf("%s=%s\n", configName, value)
+			fmt.Printf("%s=%v\n", configName, value)
 		}
 	case OutputFormatJSON:
 		data, err := json.MarshalIndent(outputMap, "", "  ")
@@ -135,4 +140,81 @@ func UpdateConfig(ctx context.Context, dao db.DAO, ociService oci.Service, id st
 	}
 
 	return nil
+}
+
+func flattenConfig(config map[string]any) map[string]any {
+	output := make(map[string]any)
+	for key, value := range config {
+		if sub, ok := value.(map[string]any); ok {
+			for subKey, subValue := range flattenConfig(sub) {
+				output[fmt.Sprintf("%s.%s", key, subKey)] = subValue
+			}
+		} else {
+			if strings.Contains(key, ".") {
+				// Ignore keys that contain a dot, unsupported
+				continue
+			}
+			output[key] = value
+		}
+	}
+	return output
+}
+
+func getConfigValue(configName string, config map[string]any) any {
+	if config == nil {
+		return nil
+	}
+
+	key, rest, foundSep := strings.Cut(configName, ".")
+	if !foundSep {
+		return config[key]
+	}
+
+	childConfig, ok := config[key].(map[string]any)
+	if !ok {
+		return nil
+	}
+
+	return getConfigValue(rest, childConfig)
+}
+
+func mergeValueIntoMap(output map[string]any, path string, value any) {
+	key, rest, foundSep := strings.Cut(path, ".")
+	if !foundSep {
+		output[key] = value
+		return
+	}
+
+	_, found := output[key]
+	if !found {
+		output[key] = make(map[string]any)
+	}
+
+	childConfig, ok := output[key].(map[string]any)
+	if !ok {
+		return
+	}
+
+	mergeValueIntoMap(childConfig, rest, value)
+}
+
+func deleteValueFromMap(output map[string]any, path string) bool {
+	key, rest, foundSep := strings.Cut(path, ".")
+	if !foundSep {
+		_, found := output[key]
+		delete(output, key)
+		return found
+	}
+
+	childConfig, ok := output[key].(map[string]any)
+	if !ok {
+		return false
+	}
+
+	deleted := deleteValueFromMap(childConfig, rest)
+	if deleted && len(childConfig) == 0 {
+		// If child config is now empty, delete the whole object
+		delete(output, key)
+	}
+	return deleted
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/docker/mcp-gateway/pkg/client"
 	"github.com/docker/mcp-gateway/pkg/db"
 	"github.com/docker/mcp-gateway/pkg/oci"
 	"github.com/docker/mcp-gateway/pkg/registryapi"
@@ -14,6 +15,8 @@ import (
 )
 
 func workingSetCommand() *cobra.Command {
+	cfg := client.ReadConfig()
+
 	cmd := &cobra.Command{
 		Use:   "profile",
 		Short: "Manage profiles",
@@ -23,14 +26,14 @@ func workingSetCommand() *cobra.Command {
 	cmd.AddCommand(importWorkingSetCommand())
 	cmd.AddCommand(showWorkingSetCommand())
 	cmd.AddCommand(listWorkingSetsCommand())
-	cmd.AddCommand(serversCommand())
 	cmd.AddCommand(pushWorkingSetCommand())
 	cmd.AddCommand(pullWorkingSetCommand())
-	cmd.AddCommand(createWorkingSetCommand())
+	cmd.AddCommand(createWorkingSetCommand(cfg))
 	cmd.AddCommand(removeWorkingSetCommand())
 	cmd.AddCommand(workingsetServerCommand())
 	cmd.AddCommand(configWorkingSetCommand())
 	cmd.AddCommand(toolsWorkingSetCommand())
+	cmd.AddCommand(manualInstructionsCommand())
 	return cmd
 }
 
@@ -60,7 +63,7 @@ func configWorkingSetCommand() *cobra.Command {
 	}
 
 	flags := cmd.Flags()
-	flags.StringArrayVar(&set, "set", []string{}, "Set configuration values: <key>=<value> (can be specified multiple times)")
+	flags.StringArrayVar(&set, "set", []string{}, "Set configuration values: <key>=<value> (repeatable). Value may be JSON to set typed values (arrays, numbers, booleans, objects).")
 	flags.StringArrayVar(&get, "get", []string{}, "Get configuration values: <key> (can be specified multiple times)")
 	flags.StringArrayVar(&del, "del", []string{}, "Delete configuration values: <key> (can be specified multiple times)")
 	flags.BoolVar(&getAll, "get-all", false, "Get all configuration values")
@@ -123,29 +126,34 @@ To view enabled tools, use: docker mcp profile show <profile-id>`,
 	return cmd
 }
 
-func createWorkingSetCommand() *cobra.Command {
+func createWorkingSetCommand(cfg *client.Config) *cobra.Command {
 	var opts struct {
 		ID      string
 		Name    string
 		Servers []string
+		Connect []string
 	}
 
 	cmd := &cobra.Command{
-		Use:   "create --name <name> [--id <id>] --server <ref1> --server <ref2> ...",
+		Use:   "create --name <name> [--id <id>] --server <ref1> --server <ref2> ... [--connect <client1> --connect <client2> ...]",
 		Short: "Create a new profile of MCP servers",
 		Long: `Create a new profile that groups multiple MCP servers together.
 A profile allows you to organize and manage related servers as a single unit.
 Profiles are decoupled from catalogs. Servers can be:
   - MCP Registry references (e.g. http://registry.modelcontextprotocol.io/v0/servers/312e45a4-2216-4b21-b9a8-0f1a51425073)
-  - OCI image references with docker:// prefix (e.g., "docker://mcp/github:latest")`,
-		Example: `  # Create a profile with multiple servers (OCI references)
-  docker mcp profile create --name dev-tools --server docker://mcp/github:latest --server docker://mcp/slack:latest
+  - OCI image references with docker:// prefix (e.g., "docker://my-server:latest"). Images must be self-describing.
+	- Catalog references with catalog:// prefix (e.g., "catalog://mcp/docker-mcp-catalog/github+obsidian").`,
+		Example: `  # Create a profile with servers from a catalog
+  docker mcp profile create --name dev-tools --server catalog://mcp/docker-mcp-catalog/github+obsidian
+
+  # Create a profile with multiple servers (OCI references)
+  docker mcp profile create --name my-profile --server docker://my-server:latest --server docker://my-other-server:latest
 
   # Create a profile with MCP Registry references
-  docker mcp profile create --name registry-servers --server http://registry.modelcontextprotocol.io/v0/servers/71de5a2a-6cfb-4250-a196-f93080ecc860
+  docker mcp profile create --name my-profile --server http://registry.modelcontextprotocol.io/v0/servers/71de5a2a-6cfb-4250-a196-f93080ecc860
 
-  # Mix MCP Registry references and OCI references
-  docker mcp profile create --name mixed --server http://registry.modelcontextprotocol.io/v0/servers/71de5a2a-6cfb-4250-a196-f93080ecc860 --server docker://mcp/github:latest`,
+  # Connect to clients upon creation
+  docker mcp profile create --name dev-tools --connect cursor`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			dao, err := db.New()
@@ -154,15 +162,15 @@ Profiles are decoupled from catalogs. Servers can be:
 			}
 			registryClient := registryapi.NewClient()
 			ociService := oci.NewService()
-			return workingset.Create(cmd.Context(), dao, registryClient, ociService, opts.ID, opts.Name, opts.Servers)
+			return workingset.Create(cmd.Context(), dao, registryClient, ociService, opts.ID, opts.Name, opts.Servers, opts.Connect)
 		},
 	}
 
 	flags := cmd.Flags()
 	flags.StringVar(&opts.Name, "name", "", "Name of the profile (required)")
 	flags.StringVar(&opts.ID, "id", "", "ID of the profile (defaults to a slugified version of the name)")
-	flags.StringArrayVar(&opts.Servers, "server", []string{}, "Server to include: catalog name or OCI reference with docker:// prefix (can be specified multiple times)")
-
+	flags.StringArrayVar(&opts.Servers, "server", []string{}, "Server to include specified with a URI: https:// (MCP Registry reference) or docker:// (Docker Image reference) or catalog:// (Catalog reference). Can be specified multiple times.")
+	flags.StringArrayVar(&opts.Connect, "connect", []string{}, fmt.Sprintf("Clients to connect to: mcp-client (can be specified multiple times). Supported clients: %s", client.GetSupportedMCPClients(*cfg)))
 	_ = cmd.MarkFlagRequired("name")
 
 	return cmd
@@ -197,6 +205,7 @@ func listWorkingSetsCommand() *cobra.Command {
 
 func showWorkingSetCommand() *cobra.Command {
 	format := string(workingset.OutputFormatHumanReadable)
+	var showClients bool
 
 	cmd := &cobra.Command{
 		Use:   "show <profile-id>",
@@ -211,13 +220,13 @@ func showWorkingSetCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return workingset.Show(cmd.Context(), dao, args[0], workingset.OutputFormat(format))
+			return workingset.Show(cmd.Context(), dao, args[0], workingset.OutputFormat(format), showClients)
 		},
 	}
 
 	flags := cmd.Flags()
 	flags.StringVar(&format, "format", string(workingset.OutputFormatHumanReadable), fmt.Sprintf("Supported: %s.", strings.Join(workingset.SupportedFormats(), ", ")))
-
+	flags.BoolVar(&showClients, "clients", false, "Include client information in output")
 	return cmd
 }
 
@@ -299,34 +308,34 @@ func removeWorkingSetCommand() *cobra.Command {
 	}
 }
 
-func serversCommand() *cobra.Command {
+func listServersCommand() *cobra.Command {
 	var opts struct {
-		WorkingSetID string
-		Filter       string
-		Format       string
+		Filters []string
+		Format  string
 	}
 
 	cmd := &cobra.Command{
-		Use:   "servers",
-		Short: "List servers across profiles",
+		Use:     "ls",
+		Aliases: []string{"list"},
+		Short:   "List servers across profiles",
 		Long: `List all servers grouped by profile.
 
-Use --filter to search for servers matching a query (case-insensitive substring matching on image names or source URLs).
-Use --profile to show servers only from a specific profile.`,
+Use --filter to search for servers matching a query (case-insensitive substring matching on server names).
+Filters use key=value format (e.g., name=github, profile=my-dev-env).`,
 		Example: `  # List all servers across all profiles
-  docker mcp profile servers
+  docker mcp profile server ls
 
   # Filter servers by name
-  docker mcp profile servers --filter github
+  docker mcp profile server ls --filter name=github
 
   # Show servers from a specific profile
-  docker mcp profile servers --profile dev-tools
+  docker mcp profile server ls --filter profile=my-dev-env
 
-  # Combine filter and profile
-  docker mcp profile servers --profile dev-tools --filter slack
+  # Combine multiple filters (using short flag)
+  docker mcp profile server ls -f name=slack -f profile=my-dev-env
 
   # Output in JSON format
-  docker mcp profile servers --format json`,
+  docker mcp profile server ls --format json`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			supported := slices.Contains(workingset.SupportedFormats(), opts.Format)
@@ -339,13 +348,12 @@ Use --profile to show servers only from a specific profile.`,
 				return err
 			}
 
-			return workingset.Servers(cmd.Context(), dao, opts.Filter, opts.WorkingSetID, workingset.OutputFormat(opts.Format))
+			return workingset.ListServers(cmd.Context(), dao, opts.Filters, workingset.OutputFormat(opts.Format))
 		},
 	}
 
 	flags := cmd.Flags()
-	flags.StringVarP(&opts.WorkingSetID, "profile", "p", "", "Show servers only from specified profile")
-	flags.StringVar(&opts.Filter, "filter", "", "Filter servers by image name or source URL")
+	flags.StringArrayVarP(&opts.Filters, "filter", "f", []string{}, "Filter output (e.g., name=github, profile=my-dev-env)")
 	flags.StringVar(&opts.Format, "format", string(workingset.OutputFormatHumanReadable), fmt.Sprintf("Supported: %s.", strings.Join(workingset.SupportedFormats(), ", ")))
 
 	return cmd
@@ -357,6 +365,7 @@ func workingsetServerCommand() *cobra.Command {
 		Short: "Manage servers in profiles",
 	}
 
+	cmd.AddCommand(listServersCommand())
 	cmd.AddCommand(addServerCommand())
 	cmd.AddCommand(removeServerCommand())
 
@@ -365,27 +374,22 @@ func workingsetServerCommand() *cobra.Command {
 
 func addServerCommand() *cobra.Command {
 	var servers []string
-	var catalog string
-	var catalogServers []string
 
 	cmd := &cobra.Command{
-		Use:   "add <profile-id> [--server <ref1> --server <ref2> ...] [--catalog <oci-reference> --catalog-server <server1> --catalog-server <server2> ...]",
+		Use:   "add <profile-id> [--server <ref1> --server <ref2> ...]",
 		Short: "Add MCP servers to a profile",
 		Long:  "Add MCP servers to a profile.",
-		Example: ` # Add servers with OCI references
-  docker mcp profile server add dev-tools --server docker://mcp/github:latest --server docker://mcp/slack:latest
+		Example: `  # Add servers from a catalog
+  docker mcp profile server add dev-tools --server catalog://mcp/docker-mcp-catalog/github+obsidian
+
+  # Add servers with OCI references
+  docker mcp profile server add my-profile --server docker://my-server:latest
 
   # Add servers with MCP Registry references
-  docker mcp profile server add dev-tools --server http://registry.modelcontextprotocol.io/v0/servers/71de5a2a-6cfb-4250-a196-f93080ecc860
+  docker mcp profile server add my-profile --server http://registry.modelcontextprotocol.io/v0/servers/71de5a2a-6cfb-4250-a196-f93080ecc860
 
-  # Mix MCP Registry references and OCI references
-  docker mcp profile server add dev-tools --server http://registry.modelcontextprotocol.io/v0/servers/71de5a2a-6cfb-4250-a196-f93080ecc860 --server docker://mcp/github:latest
-
-  # Add servers from a catalog
-  docker mcp profile server add dev-tools --catalog my-catalog --catalog-server github --catalog-server slack
-
-  # Mix catalog servers with direct server references
-  docker mcp profile server add dev-tools --catalog my-catalog --catalog-server github --server docker://mcp/slack:latest`,
+  # Mix server references
+  docker mcp profile server add dev-tools --server catalog://mcp/docker-mcp-catalog/github+obsidian --server docker://my-server:latest`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dao, err := db.New()
@@ -394,14 +398,12 @@ func addServerCommand() *cobra.Command {
 			}
 			registryClient := registryapi.NewClient()
 			ociService := oci.NewService()
-			return workingset.AddServers(cmd.Context(), dao, registryClient, ociService, args[0], servers, catalog, catalogServers)
+			return workingset.AddServers(cmd.Context(), dao, registryClient, ociService, args[0], servers)
 		},
 	}
 
 	flags := cmd.Flags()
-	flags.StringArrayVar(&servers, "server", []string{}, "Server to include: MCP Registry reference or OCI reference with docker:// prefix (can be specified multiple times)")
-	flags.StringVar(&catalog, "catalog", "", "Catalog to add servers from (optional)")
-	flags.StringArrayVar(&catalogServers, "catalog-server", []string{}, "Server names from the catalog to add (can be specified multiple times, requires --catalog)")
+	flags.StringArrayVar(&servers, "server", []string{}, "Server to include specified with a URI: https:// (MCP Registry reference) or docker:// (Docker Image reference) or catalog:// (Catalog reference). Can be specified multiple times.")
 
 	return cmd
 }
@@ -432,5 +434,27 @@ func removeServerCommand() *cobra.Command {
 	flags := cmd.Flags()
 	flags.StringArrayVar(&names, "name", []string{}, "Server name to remove (can be specified multiple times)")
 
+	return cmd
+}
+
+func manualInstructionsCommand() *cobra.Command {
+	var format string
+
+	cmd := &cobra.Command{
+		Use:    "manual-instructions <profile-id>",
+		Short:  "Display the manual instructions to connect an MCP client to a profile",
+		Args:   cobra.ExactArgs(1),
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			supported := slices.Contains(workingset.SupportedFormats(), format)
+			if !supported {
+				return fmt.Errorf("unsupported format: %s", format)
+			}
+			return workingset.WriteManualInstructions(args[0], workingset.OutputFormat(format), cmd.OutOrStdout())
+		},
+	}
+
+	flags := cmd.Flags()
+	flags.StringVar(&format, "format", string(workingset.OutputFormatHumanReadable), fmt.Sprintf("Supported: %s.", strings.Join(workingset.SupportedFormats(), ", ")))
 	return cmd
 }

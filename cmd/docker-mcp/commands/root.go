@@ -3,14 +3,18 @@ package commands
 import (
 	"context"
 	"os"
+	"slices"
 
 	"github.com/docker/cli/cli-plugins/plugin"
 	"github.com/docker/cli/cli/command"
 	"github.com/spf13/cobra"
 
 	"github.com/docker/mcp-gateway/cmd/docker-mcp/version"
+	"github.com/docker/mcp-gateway/pkg/db"
 	"github.com/docker/mcp-gateway/pkg/desktop"
 	"github.com/docker/mcp-gateway/pkg/docker"
+	"github.com/docker/mcp-gateway/pkg/features"
+	"github.com/docker/mcp-gateway/pkg/migrate"
 )
 
 // Note: We use a custom help template to make it more brief.
@@ -30,7 +34,9 @@ Examples:
 `
 
 // Root returns the root command for the init plugin
-func Root(ctx context.Context, cwd string, dockerCli command.Cli) *cobra.Command {
+func Root(ctx context.Context, cwd string, dockerCli command.Cli, features features.Features) *cobra.Command {
+	dockerClient := docker.NewClient(dockerCli)
+
 	cmd := &cobra.Command{
 		Use:              "mcp [OPTIONS]",
 		Short:            "Manage MCP servers and clients",
@@ -45,7 +51,23 @@ func Root(ctx context.Context, cwd string, dockerCli command.Cli) *cobra.Command
 				return err
 			}
 
+			// Check the feature initialization error here for clearer error messages for the user
+			if features.InitError() != nil {
+				return features.InitError()
+			}
+
 			if os.Getenv("DOCKER_MCP_IN_CONTAINER") != "1" {
+				if features.IsProfilesFeatureEnabled() {
+					if isSubcommandOf(cmd, []string{"catalog-next", "catalog", "profile"}) {
+						dao, err := db.New()
+						if err != nil {
+							return err
+						}
+						defer dao.Close()
+						migrate.MigrateConfig(cmd.Context(), dockerClient, dao)
+					}
+				}
+
 				runningInDockerCE, err := docker.RunningInDockerCE(ctx, dockerCli)
 				if err != nil {
 					return err
@@ -68,17 +90,15 @@ func Root(ctx context.Context, cwd string, dockerCli command.Cli) *cobra.Command
 		return []string{"--help"}, cobra.ShellCompDirectiveNoFileComp
 	})
 
-	dockerClient := docker.NewClient(dockerCli)
-
-	if isWorkingSetsFeatureEnabled(dockerCli) {
+	if features.IsProfilesFeatureEnabled() {
 		cmd.AddCommand(workingSetCommand())
 		cmd.AddCommand(catalogNextCommand())
 	}
 	cmd.AddCommand(catalogCommand(dockerCli))
-	cmd.AddCommand(clientCommand(dockerCli, cwd))
+	cmd.AddCommand(clientCommand(dockerCli, cwd, features))
 	cmd.AddCommand(configCommand(dockerClient))
-	cmd.AddCommand(featureCommand(dockerCli))
-	cmd.AddCommand(gatewayCommand(dockerClient, dockerCli))
+	cmd.AddCommand(featureCommand(dockerCli, features))
+	cmd.AddCommand(gatewayCommand(dockerClient, dockerCli, features))
 	cmd.AddCommand(oauthCommand())
 	cmd.AddCommand(policyCommand())
 	cmd.AddCommand(registryCommand())
@@ -100,4 +120,16 @@ func unhideHiddenCommands(cmd *cobra.Command) {
 		c.Hidden = false
 		unhideHiddenCommands(c)
 	}
+}
+
+func isSubcommandOf(cmd *cobra.Command, names []string) bool {
+	if cmd == nil {
+		return false
+	}
+
+	if slices.Contains(names, cmd.Name()) {
+		return true
+	}
+
+	return isSubcommandOf(cmd.Parent(), names)
 }

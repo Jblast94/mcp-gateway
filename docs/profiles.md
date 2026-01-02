@@ -17,7 +17,9 @@ Profiles are decoupled from catalogs, meaning the servers in a profile can come 
 
 ## Enabling Profiles
 
-Profiles are a feature that must be enabled first:
+Profiles are a feature that must be enabled first.
+
+In Docker CE or container mode:
 
 ```bash
 # Enable the profiles feature
@@ -26,6 +28,8 @@ docker mcp feature enable profiles
 # Verify it's enabled
 docker mcp feature list
 ```
+
+If you're using Docker Desktop, you have to enable the `MCPWorkingSets` feature flag within Docker Desktop instead.
 
 Once enabled, you'll have access to:
 - `docker mcp profile` commands for managing profiles
@@ -41,8 +45,8 @@ Create a new profile with a name and list of servers:
 ```bash
 # Create a profile with OCI image references
 docker mcp profile create --name dev-tools \
-  --server docker://mcp/github:latest \
-  --server docker://mcp/slack:latest
+  --server docker://my-server:latest \
+  --server docker://my-other-server:latest
 
 # Create with MCP Registry references
 docker mcp profile create --name registry-servers \
@@ -51,11 +55,11 @@ docker mcp profile create --name registry-servers \
 # Mix MCP Registry and OCI references
 docker mcp profile create --name mixed \
   --server https://registry.modelcontextprotocol.io/v0/servers/71de5a2a-6cfb-4250-a196-f93080ecc860 \
-  --server docker://mcp/github:latest
+  --server docker://my-server:latest
 
 # Specify a custom ID (otherwise derived from name)
 docker mcp profile create --name "My Servers" --id my-servers \
-  --server docker://mcp/github:latest
+  --server docker://my-server:latest
 ```
 
 **Notes:**
@@ -73,8 +77,8 @@ After creating a profile, you can add more servers to it:
 ```bash
 # Add servers with OCI references
 docker mcp profile server add dev-tools \
-  --server docker://mcp/github:latest \
-  --server docker://mcp/slack:latest
+  --server docker://my-server:latest \
+  --server docker://my-other-server:latest
 
 # Add servers with MCP Registry references
 docker mcp profile server add dev-tools \
@@ -83,27 +87,24 @@ docker mcp profile server add dev-tools \
 # Mix MCP Registry references and OCI references
 docker mcp profile server add dev-tools \
   --server https://registry.modelcontextprotocol.io/v0/servers/71de5a2a-6cfb-4250-a196-f93080ecc860 \
-  --server docker://mcp/github:latest
+  --server docker://my-server:latest
 
 # Add servers from a catalog
 docker mcp profile server add dev-tools \
-  --catalog my-catalog \
-  --catalog-server github \
-  --catalog-server slack
+  --server catalog://mcp/docker-mcp-catalog/github+slack
 
 # Mix catalog servers with direct server references
 docker mcp profile server add dev-tools \
-  --catalog my-catalog \
-  --catalog-server github \
-  --server docker://mcp/slack:latest
+  --server catalog://mcp/docker-mcp-catalog/github
+  --server docker://my-server:latest
 ```
 
 **Server References:**
-- Use `--server` flag for direct server references (can be specified multiple times)
+- Use `--server` flag for all server references (can be specified multiple times)
 - Server references must start with:
+  - `catalog://` for catalog references. This takes the form of `catalog://<catalog-oci-refence>/<server-1>+<server-2>
   - `docker://` for OCI images
   - `http://` or `https://` for MCP Registry URLs
-- Use `--catalog` with `--catalog-server` to add servers from a catalog
 - Catalog servers are referenced by their name within the catalog
 
 **Notes:**
@@ -273,6 +274,27 @@ docker mcp profile config my-profile --get-all --format yaml
 - `--get-all`: Retrieves all configuration values from all servers in the profile
 - `--format`: Output format - `human` (default), `json`, or `yaml`
 
+**Typed values via JSON:**
+
+- Values passed to `--set` are parsed as JSON when possible. This allows arrays, numbers, booleans and objects.
+- If the value is not valid JSON, it is stored as a plain string.
+- Examples:
+
+```bash
+# Numbers and booleans
+docker mcp profile config my-profile --set github.timeout=60 --set github.debug=true
+
+# Strings (either raw or JSON-quoted both work)
+docker mcp profile config my-profile --set slack.channel=general
+docker mcp profile config my-profile --set slack.channel='"general"'
+
+# Arrays
+docker mcp profile config my-profile --set filesystem.paths='["/Users/dk/dev","/Users/dk/projects"]'
+
+# Objects
+docker mcp profile config my-profile --set build.options='{"retries":3,"cache":false}'
+```
+
 **Important notes:**
 - The server name must match the name from the server's snapshot (not the image or source URL)
 - Use `docker mcp profile show <profile-id> --format yaml` to see available server names
@@ -432,6 +454,9 @@ docker mcp client connect claude -p my-profile
 
 # Using long form
 docker mcp client connect cursor --profile my-profile
+
+# Connect upon creating the profile
+docker mcp profile create --name my-profile --connect cursor
 ```
 
 This generates the appropriate client configuration using the servers from your profile.
@@ -514,15 +539,14 @@ secrets:
 ```bash
 # 1. Create a development profile
 docker mcp profile create --name dev \
-  --server docker://mcp/github:latest \
-  --server docker://mcp/filesystem:latest
+  --server catalog://mcp/docker-mcp-catalog:latest/filesystem
 
 # 2. Test it with the gateway
 docker mcp gateway run --profile dev
 
 # 3. Add more servers as needed
 docker mcp profile server add dev \
-  --server docker://mcp/postgres:latest
+  --server catalog://mcp/docker-mcp-catalog:latest/slack
 
 # 4. Remove servers you don't need
 docker mcp profile server remove dev --name filesystem
@@ -542,8 +566,8 @@ docker mcp profile export dev ./dev-profile.yaml
 ```bash
 # Team lead: Create and share
 docker mcp profile create --name team-tools \
-  --server docker://mcp/github:latest \
-  --server docker://mcp/slack:latest \
+  --server docker://my-server:latest \
+  --server docker://my-other-server:latest \
   --server docker://mcp/jira:latest
 
 docker mcp profile push team-tools docker.io/myorg/team-tools:v1.0
@@ -558,13 +582,13 @@ docker mcp gateway run --profile team-tools
 ```bash
 # Create different profiles for different environments
 docker mcp profile create --name production \
-  --server docker://mcp/monitoring:latest \
-  --server docker://mcp/logging:latest
+  --server docker://monitoring:latest \
+  --server docker://logging:latest
 
 docker mcp profile create --name staging \
-  --server docker://mcp/monitoring:latest \
-  --server docker://mcp/logging:latest \
-  --server docker://mcp/debug:latest
+  --server docker://monitoring:latest \
+  --server docker://logging:latest \
+  --server docker://debug:latest
 
 # Run with appropriate environment
 docker mcp gateway run --profile production  # In production
@@ -576,12 +600,12 @@ docker mcp gateway run --profile staging     # In staging
 ```bash
 # Create profiles per project
 docker mcp profile create --name project-a \
-  --server docker://mcp/github:latest \
-  --server docker://mcp/postgres:latest
+  --server docker://my-server:latest \
+  --server docker://postgres:latest
 
 docker mcp profile create --name project-b \
-  --server docker://mcp/github:latest \
-  --server docker://mcp/mongodb:latest
+  --server docker://my-server:latest \
+  --server docker://mongodb:latest
 
 # Switch between projects easily
 docker mcp gateway run --profile project-a
@@ -594,7 +618,7 @@ docker mcp gateway run --profile project-b
 ```bash
 # Create a profile
 docker mcp profile create --name my-tools \
-  --server docker://mcp/github:v1.0
+  --server docker://my-server:v1.0
 
 # Push version 1.0
 docker mcp profile push my-tools docker.io/myorg/my-tools:1.0
@@ -627,14 +651,11 @@ docker mcp profile create --name my-workflow
 
 # 3. Add specific servers from Docker's official catalog
 docker mcp profile server add my-workflow \
-  --catalog docker-mcp-catalog \
-  --catalog-server github \
-  --catalog-server slack
+  --server catalog://docker-mcp-catalog/github+slack
 
 # 4. Optionally add servers from another catalog or direct references
 docker mcp profile server add my-workflow \
-  --catalog myorg/team-catalog \
-  --catalog-server custom-tool
+  --server catalog://my-org/team-catalog/custom-tool
 
 # Or add a direct OCI reference
 docker mcp profile server add my-workflow \
@@ -650,8 +671,8 @@ docker mcp gateway run --profile my-workflow
 ```bash
 # Create a production profile with restricted tool access
 docker mcp profile create --name production \
-  --server docker://mcp/github:latest \
-  --server docker://mcp/slack:latest
+  --server docker://my-server:latest \
+  --server docker://my-other-server:latest
 
 # Disable all tools first, then enable only what's needed
 docker mcp profile tools production --disable-all github --disable-all slack
@@ -723,7 +744,7 @@ Error: profile my-set not found
 Error: unknown command "profile" for "docker mcp"
 ```
 
-**Solution**: Enable the feature with `docker mcp feature enable profiles`
+**Solution**: In Docker CE or container mode, enable the feature with `docker mcp feature enable profiles`. In Docker Desktop, enable the `MCPWorkingSets` feature flag.
 
 ### Invalid Server Reference
 
@@ -798,19 +819,6 @@ docker mcp profile config my-set --del github.timeout
 docker mcp profile config my-set --set github.timeout=60
 ```
 
-### Missing Catalog Reference
-
-```bash
-Error: --catalog-server requires --catalog to be specified
-```
-
-**Solution**: When using `--catalog-server`, you must also provide `--catalog`:
-```bash
-docker mcp profile server add my-profile \
-  --catalog my-catalog \
-  --catalog-server github
-```
-
 ### Server Not Found in Catalog
 
 ```bash
@@ -883,7 +891,7 @@ Error: tool 'invalid_tool' not found in server 'github'
 - Full registry support in the gateway
 - Search and discovery features
 
-## Creating Catalogs from Profiles
+## Creating Catalogs
 
 The `catalog-next` command allows you to create and share catalogs:
 
@@ -897,11 +905,20 @@ docker mcp catalog-next create my-catalog --from-profile my-profile --name "My C
 # Create a catalog from a legacy catalog
 docker mcp catalog-next create docker-mcp-catalog --from-legacy-catalog https://desktop.docker.com/mcp/catalog/v3/catalog.json
 
+# Create a catalog with servers from other catalogs
+docker mcp catalog-next create dev-catalog --title dev-tools --server catalog://mcp/docker-mcp-catalog/github+notion+obsidian
+
+# Create a catalog with your own MCP server
+docker mcp catalog-next create my-catalog --title my-catalog --server docker://my-server:latest
+
 # List all catalogs
 docker mcp catalog-next list
 
 # Show catalog details
 docker mcp catalog-next show my-catalog
+
+# Show a catalog, pulling it if missing (other options include 'never' and 'always')
+docker mcp catalog-next show mcp/docker-mcp-catalog --pull missing
 
 # Remove a catalog
 docker mcp catalog-next remove my-catalog
@@ -926,7 +943,7 @@ docker mcp catalog-next pull myorg/my-catalog:latest
 docker mcp catalog-next create docker-mcp-catalog \
   --from-legacy-catalog https://desktop.docker.com/mcp/catalog/v3/catalog.json
 ```
-This gives you access to Docker's curated collection of MCP servers, which you can then use to build your profiles with the `--catalog` and `--catalog-server` flags.
+This gives you access to Docker's curated collection of MCP servers, which you can then use to build your profiles with the `--server catalog://docker-mcp-catalog/<server>` flag
 
 ## Related Documentation
 

@@ -5,12 +5,33 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"time"
 
 	"github.com/PaesslerAG/jsonpath"
 )
 
 type Feature struct {
 	Enabled bool `json:"enabled"`
+}
+
+func CheckFeatureFlagIsEnabled(ctx context.Context, featureName string) (bool, error) {
+	// Copied from https://github.com/docker/ai/commit/ae5c7d328f8aa42bc63d9398157a0673de9ffcf5
+	// Save and restore working directory because pinata code might change it.
+	wd, err := os.Getwd()
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	features, err := getFeatures(ctx)
+	if err != nil {
+		//nolint:staticcheck
+		return false, errors.New("Docker Desktop is not running")
+	}
+
+	return isFeatureEnabled(featureName, features), nil
 }
 
 // CheckFeatureIsEnabled verifies if a feature is enabled in either admin-settings.json or Docker Desktop settings.
@@ -44,6 +65,18 @@ func CheckFeatureIsEnabled(ctx context.Context, settingName string, label string
 	return nil
 }
 
+func CheckDesktopIsRunning(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
+	defer cancel()
+
+	if err := ClientBackend.Get(ctx, "/ping", nil); err != nil {
+		//nolint:staticcheck
+		return errors.New("Docker Desktop is not running")
+	}
+
+	return nil
+}
+
 func getAdminSettings() (map[string]any, error) {
 	buf, err := os.ReadFile(Paths().AdminSettingPath)
 	if err != nil {
@@ -63,4 +96,21 @@ func getSettings(ctx context.Context) (any, error) {
 		return nil, err
 	}
 	return result, nil
+}
+
+func getFeatures(ctx context.Context) (map[string]Feature, error) {
+	var result map[string]Feature
+	if err := ClientBackend.Get(ctx, "/features", &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func isFeatureEnabled(featureName string, features map[string]Feature) bool {
+	for name, feature := range features {
+		if name == featureName && feature.Enabled {
+			return true
+		}
+	}
+	return false
 }
